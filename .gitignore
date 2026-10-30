@@ -1,0 +1,27 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated output
+output/
+detected_test.jpg
+
+# Environment and editor files
+.env
+.vscode/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
