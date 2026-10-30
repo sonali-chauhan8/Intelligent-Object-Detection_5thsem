@@ -1,0 +1,10 @@
+{
+    "model": "YOLO11s",
+    "dataset": "COCO validation subset (500 images)",
+    "device": "CPU",
+    "precision": 0.7202249891948875,
+    "recall": 0.5944541716405082,
+    "mAP50": 0.6602830939457875,
+    "mAP50_95": 0.49154046471241536,
+    "F1": 0.6513235504160336
+}

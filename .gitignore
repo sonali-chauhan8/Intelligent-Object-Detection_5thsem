@@ -25,3 +25,14 @@ detected_test.jpg
 # OS files
 .DS_Store
 Thumbs.db
+
+# Evaluation datasets
+datasets/
+
+# Generated evaluation files
+evaluation/predictions/
+evaluation/runs/
+
+# Temporary input images and notebooks
+input/images/.ipynb_checkpoints/
+
