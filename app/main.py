@@ -1001,16 +1001,21 @@ elif page == "Live Webcam":
     )
 
     webrtc_streamer(
-        key=f"live-object-detection-{selected_model}",
-        video_processor_factory=lambda: YOLOVideoProcessor(
-            selected_model
-        ),
-        media_stream_constraints={
-            "video": True,
-            "audio": False
-        },
-        async_processing=True
-    )
+    key=f"live-object-detection-{selected_model}",
+    video_processor_factory=lambda: YOLOVideoProcessor(
+        selected_model
+    ),
+    media_stream_constraints={
+        "video": True,
+        "audio": False
+    },
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]}
+        ]
+    },
+    async_processing=True
+)
 
 
 # ==========================================
