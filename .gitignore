@@ -36,3 +36,9 @@ evaluation/runs/
 # Temporary input images and notebooks
 input/images/.ipynb_checkpoints/
 
+
+# Sample and temporary input files
+input/videos/*
+input/test_images/
+input/download.jpeg
+input/images/*

@@ -1,5 +1,6 @@
 
 import pandas as pd
+import time
 import hashlib
 import json
 import tempfile
@@ -21,7 +22,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 st.set_page_config(
     page_title="Intelligent Object Detection",
-    page_icon="🎯",
+    page_icon="OD",
     layout="wide"
 )
 
@@ -31,8 +32,18 @@ st.set_page_config(
 # ==========================================
 
 @st.cache_resource
-def load_model():
-    model_path = Path(__file__).resolve().parent.parent / "yolo11n.pt"
+def load_model(model_name):
+
+    model_path = (
+        Path(__file__).resolve().parent.parent
+        / f"{model_name}.pt"
+    )
+
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Model file not found: {model_path}"
+        )
+
     return YOLO(str(model_path))
 
 
@@ -48,7 +59,11 @@ HISTORY_FILE = (
 
 
 def save_detection_record(record):
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    HISTORY_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     history = load_detection_history()
 
@@ -63,6 +78,7 @@ def save_detection_record(record):
 
 
 def load_detection_history():
+
     if not HISTORY_FILE.exists():
         return []
 
@@ -74,17 +90,30 @@ def load_detection_history():
         return []
 
 
+
 # ==========================================
 # 4. LIVE WEBCAM PROCESSOR
 # ==========================================
 
 class YOLOVideoProcessor(VideoProcessorBase):
 
-    def __init__(self):
-        self.model = load_model()
+    def __init__(self, model_name):
+
+        self.model = load_model(model_name)
+
+        # Performance monitoring
+        self.frame_count = 0
+        self.total_inference_time = 0.0
+        self.start_time = time.perf_counter()
+        # Store movement history for each tracking ID
+        self.track_history = {}
 
     def recv(self, frame):
+
         image = frame.to_ndarray(format="bgr24")
+
+        # Measure inference time
+        inference_start = time.perf_counter()
 
         results = self.model.track(
             image,
@@ -94,18 +123,113 @@ class YOLOVideoProcessor(VideoProcessorBase):
             verbose=False
         )
 
+        inference_end = time.perf_counter()
+
+        inference_time = inference_end - inference_start
+        self.total_inference_time += inference_time
+        self.frame_count += 1
+
+        # Calculate performance metrics
+        average_inference_time = (
+            self.total_inference_time / self.frame_count
+        ) * 1000
+
+        elapsed_time = time.perf_counter() - self.start_time
+
+        actual_fps = (
+            self.frame_count / elapsed_time
+            if elapsed_time > 0
+            else 0
+        )
+
         result = results[0]
         annotated_image = result.plot()
 
-        count = len(result.boxes) if result.boxes is not None else 0
+        # Draw movement trails for tracked objects
+        if result.boxes is not None and result.boxes.id is not None:
 
+            boxes = result.boxes.xyxy.cpu().numpy()
+            track_ids = result.boxes.id.int().cpu().tolist()
+
+            for box, track_id in zip(boxes, track_ids):
+
+                x1, y1, x2, y2 = map(int, box)
+
+                center_x = (x1 + x2) // 2
+                center_y = (y1 + y2) // 2
+
+                if track_id not in self.track_history:
+                    self.track_history[track_id] = []
+
+                self.track_history[track_id].append(
+                    (center_x, center_y)
+                )
+
+                # Keep only the latest 30 positions
+                self.track_history[track_id] = (
+                    self.track_history[track_id][-30:]
+                )
+
+                points = self.track_history[track_id]
+
+                # Draw movement trail
+                if len(points) > 1:
+
+                    for i in range(1, len(points)):
+
+                        cv2.line(
+                            annotated_image,
+                            points[i - 1],
+                            points[i],
+                            (255, 0, 255),
+                            2
+                        )
+
+        count = (
+            len(result.boxes)
+            if result.boxes is not None
+            else 0
+        )
+
+        # Display object count on every frame
         cv2.putText(
             annotated_image,
             f"Objects detected: {count}",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1,
+            0.8,
             (0, 255, 0),
+            2
+        )
+
+        # Display performance metrics
+        cv2.putText(
+            annotated_image,
+            f"Inference: {average_inference_time:.2f} ms",
+            (20, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            annotated_image,
+            f"FPS: {actual_fps:.2f}",
+            (20, 105),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            annotated_image,
+            f"Frames: {self.frame_count}",
+            (20, 135),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
             2
         )
 
@@ -115,11 +239,12 @@ class YOLOVideoProcessor(VideoProcessorBase):
         )
 
 
+
 # ==========================================
 # 5. SIDEBAR NAVIGATION
 # ==========================================
 
-st.sidebar.title("🎯 Navigation")
+st.sidebar.title("Navigation")
 
 page = st.sidebar.radio(
     "Select Module",
@@ -132,15 +257,33 @@ page = st.sidebar.radio(
     ]
 )
 
+st.sidebar.divider()
+
+st.sidebar.subheader("Detection Model")
+
+selected_model = st.sidebar.selectbox(
+    "Detection model",
+    ["yolo11n", "yolo11s"],
+    format_func=lambda x: (
+        "YOLO11n (faster)"
+        if x == "yolo11n"
+        else "YOLO11s (larger model)"
+    )
+)
+
+st.sidebar.caption(
+    "YOLO11n is the lighter model. YOLO11s is larger and may detect some objects more reliably, but can run slower."
+)
+
 
 # ==========================================
 # 6. APPLICATION HEADER
 # ==========================================
 
-st.title("🎯 Intelligent Object Detection System")
+st.title("Intelligent Object Detection System")
 
 st.caption(
-    "Real-Time Object Detection using Deep Learning"
+    "Object detection and tracking with YOLO and OpenCV"
 )
 
 st.divider()
@@ -156,20 +299,71 @@ if page == "Dashboard":
 
     col1, col2, col3 = st.columns(3)
 
-    col1.metric("Detection Model", "YOLO11n")
-    col2.metric("Framework", "OpenCV")
-    col3.metric("Interface", "Streamlit")
+    col1.metric(
+        "Detection Model",
+        selected_model.upper()
+    )
+
+    col2.metric(
+        "Image Processing",
+        "OpenCV"
+    )
+
+    col3.metric(
+        "Interface",
+        "Streamlit"
+    )
 
     st.subheader("Welcome")
 
     st.write(
-        "This application performs object detection "
-        "and tracking using images, videos and live webcam streams."
+        "Use this application to detect objects in images, process recorded videos, "
+        "and test detection through a live webcam."
     )
 
     st.info(
-        "Select a module from the sidebar to get started."
+        "Choose a section from the sidebar to begin."
     )
+
+    st.subheader("Available Features")
+
+    feature_col1, feature_col2 = st.columns(2)
+
+    with feature_col1:
+        st.markdown(
+            """
+            **Image Detection**
+
+            - Upload images
+            - Detect multiple objects
+            - View bounding boxes and confidence
+            - Download detection results
+
+            **Video Detection**
+
+            - Upload videos
+            - Detect and track objects
+            - Track unique object IDs
+            - Download processed videos
+            """
+        )
+
+    with feature_col2:
+        st.markdown(
+            """
+            **Live Webcam**
+
+            - Real-time object detection
+            - Object tracking
+            - Live bounding boxes
+
+            **Analytics**
+
+            - Detection history
+            - Session statistics
+            - Object detection charts
+            """
+        )
 
 
 # ==========================================
@@ -178,10 +372,10 @@ if page == "Dashboard":
 
 elif page == "Image Detection":
 
-    st.header("📷 Image Detection")
+    st.header("Image Detection")
 
     st.write(
-        "Upload an image to detect and count objects."
+        "Choose an image to view the detected objects and their counts."
     )
 
     uploaded_file = st.file_uploader(
@@ -218,15 +412,35 @@ elif page == "Image Detection":
         else:
 
             with st.spinner(
-                "Loading YOLO model and detecting objects..."
+                f"Loading {selected_model.upper()} and detecting objects..."
             ):
 
-                model = load_model()
+                model = load_model(selected_model)
+
+                # Model warm-up (excluded from performance measurement)
+                model.predict(
+                    image,
+                    conf=confidence,
+                    verbose=False
+                )
+
+                # Actual inference measurement
+                start_time = time.perf_counter()
 
                 results = model.predict(
                     image,
                     conf=confidence,
                     verbose=False
+                )
+
+                end_time = time.perf_counter()
+
+                inference_time = (end_time - start_time) * 1000
+
+                inference_fps = (
+                    1000 / inference_time
+                    if inference_time > 0
+                    else 0
                 )
 
             result = results[0]
@@ -277,19 +491,25 @@ elif page == "Image Detection":
 
             total_objects = sum(object_counts.values())
 
-            # Save image detection result only once
-            # for the same image and confidence value.
+            # Save image detection result once
+            # for the same image, model and confidence.
 
             image_id = hashlib.md5(
                 uploaded_file.getvalue()
             ).hexdigest()
 
-            record_id = f"{image_id}_{confidence}"
+            record_id = (
+                f"{image_id}_{selected_model}_{confidence}"
+            )
 
-            if st.session_state.get("last_image_recorded") != record_id:
+            if (
+                st.session_state.get("last_image_recorded")
+                != record_id
+            ):
 
                 save_detection_record({
                     "type": "image",
+                    "model": selected_model,
                     "total_objects": total_objects,
                     "object_counts": object_counts
                 })
@@ -300,7 +520,21 @@ elif page == "Image Detection":
 
             st.subheader("Object Analysis")
 
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
+
+            st.subheader("Performance")
+
+            perf_col1, perf_col2 = st.columns(2)
+
+            perf_col1.metric(
+                "Inference Time",
+                f"{inference_time:.2f} ms"
+            )
+
+            perf_col2.metric(
+                "Estimated Processing Speed",
+                f"{inference_fps:.2f} FPS"
+            )
 
             col1.metric(
                 "Total Objects Detected",
@@ -310,6 +544,11 @@ elif page == "Image Detection":
             col2.metric(
                 "Different Object Classes",
                 len(object_counts)
+            )
+
+            col3.metric(
+                "Selected Model",
+                selected_model.upper()
             )
 
             if object_counts:
@@ -348,10 +587,10 @@ elif page == "Image Detection":
 
 elif page == "Video Detection":
 
-    st.header("🎥 Video Detection & Tracking")
+    st.header("Video Detection and Tracking")
 
     st.write(
-        "Upload a video to detect and track objects."
+        "Choose a video to detect objects and follow their movement across frames."
     )
 
     uploaded_video = st.file_uploader(
@@ -371,11 +610,27 @@ elif page == "Video Detection":
 
     if uploaded_video is not None:
 
+        current_video_id = hashlib.md5(
+            uploaded_video.getvalue()
+        ).hexdigest()
+
+        if (
+            st.session_state.get("processed_video_source")
+            != current_video_id
+        ):
+            st.session_state.pop("processed_video", None)
+            st.session_state.pop("processed_heatmap", None)
+            st.session_state["processed_video_source"] = current_video_id
+
         st.video(uploaded_video)
 
         if st.button("Start Video Detection"):
 
-            model = load_model()
+            with st.spinner(
+                f"Loading {selected_model.upper()}..."
+            ):
+
+                model = load_model(selected_model)
 
             # Save uploaded video temporarily
 
@@ -442,12 +697,22 @@ elif page == "Video Detection":
                 object_counts = {}
                 processed_frames = 0
 
+                track_history = {}
+                heatmap_accumulator = np.zeros((height, width), dtype=np.float32)
+                last_frame = None
+
+                total_inference_time = 0.0
+
+                video_start_time = time.perf_counter()
+
                 while True:
 
                     success, frame = cap.read()
 
                     if not success:
                         break
+
+                    inference_start = time.perf_counter()
 
                     results = model.track(
                         frame,
@@ -457,7 +722,14 @@ elif page == "Video Detection":
                         verbose=False
                     )
 
+                    inference_end = time.perf_counter()
+
+                    total_inference_time += (
+                        inference_end - inference_start
+                    )
+
                     result = results[0]
+                    last_frame = frame.copy()
 
                     if result.boxes is not None:
 
@@ -479,8 +751,56 @@ elif page == "Video Detection":
 
                     annotated_frame = result.plot()
 
-                    writer.write(annotated_frame)
+                    # Draw movement trails for tracked objects
+                    if result.boxes is not None and result.boxes.id is not None:
 
+                        boxes = result.boxes.xyxy.cpu().numpy()
+                        track_ids = result.boxes.id.int().cpu().tolist()
+
+                        for box, track_id in zip(boxes, track_ids):
+
+                            x1, y1, x2, y2 = map(int, box)
+
+                            center_x = (x1 + x2) // 2
+                            center_y = (y1 + y2) // 2
+
+                            # Add this tracked position to the heatmap.
+                            cv2.circle(
+                                heatmap_accumulator,
+                                (center_x, center_y),
+                                20,
+                                1.0,
+                                -1
+                            )
+
+                            if track_id not in track_history:
+                                track_history[track_id] = []
+
+                            track_history[track_id].append(
+                                (center_x, center_y)
+                            )
+
+                            # Keep only the last 30 positions
+                            track_history[track_id] = (
+                                track_history[track_id][-30:]
+                            )
+
+                            points = track_history[track_id]
+
+                            # Draw the movement trail
+                            if len(points) > 1:
+
+                                for i in range(1, len(points)):
+
+                                    cv2.line(
+                                        annotated_frame,
+                                        points[i - 1],
+                                        points[i],
+                                        (255, 0, 255),
+                                        2
+                                    )
+
+                    writer.write(annotated_frame)
                     processed_frames += 1
 
                     if total_frames > 0:
@@ -496,8 +816,27 @@ elif page == "Video Detection":
                         f"Processed frames: {processed_frames}"
                     )
 
+                # Finalize the output file before it is read or displayed.
                 cap.release()
                 writer.release()
+
+                video_end_time = time.perf_counter()
+
+                total_processing_time = (
+                    video_end_time - video_start_time
+                )
+
+                average_inference_time = (
+                    (total_inference_time / processed_frames) * 1000
+                    if processed_frames > 0
+                    else 0
+                )
+
+                actual_fps = (
+                    processed_frames / total_processing_time
+                    if total_processing_time > 0
+                    else 0
+                )
 
                 # Save video detection history
 
@@ -505,6 +844,7 @@ elif page == "Video Detection":
 
                     save_detection_record({
                         "type": "video",
+                        "model": selected_model,
                         "total_objects": sum(object_counts.values()),
                         "object_counts": object_counts,
                         "frames_processed": processed_frames,
@@ -517,7 +857,25 @@ elif page == "Video Detection":
 
                     st.subheader("Video Analysis")
 
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
+                    st.subheader("Video Performance")
+
+                    perf_col1, perf_col2, perf_col3 = st.columns(3)
+
+                    perf_col1.metric(
+                        "Average Inference Time",
+                        f"{average_inference_time:.2f} ms/frame"
+                    )
+
+                    perf_col2.metric(
+                        "Actual Processing FPS",
+                        f"{actual_fps:.2f}"
+                    )
+
+                    perf_col3.metric(
+                        "Total Processing Time",
+                        f"{total_processing_time:.2f} seconds"
+                    )
 
                     col1.metric(
                         "Frames Processed",
@@ -534,6 +892,11 @@ elif page == "Video Detection":
                         sum(object_counts.values())
                     )
 
+                    col4.metric(
+                        "Selected Model",
+                        selected_model.upper()
+                    )
+
                     st.subheader(
                         "Class-wise Detection Count"
                     )
@@ -541,18 +904,41 @@ elif page == "Video Detection":
                     for name, count in object_counts.items():
                         st.write(f"- {name}: {count}")
 
-                    st.subheader("Processed Video")
-
-                    st.video(output_path)
-
                     with open(output_path, "rb") as video_file:
+                        st.session_state["processed_video"] = video_file.read()
 
-                        st.download_button(
-                            "Download Processed Video",
-                            data=video_file.read(),
-                            file_name="tracked_output.mp4",
-                            mime="video/mp4"
+                    # Convert accumulated tracked positions into a heatmap.
+                    if last_frame is not None and np.any(heatmap_accumulator):
+                        normalized_heatmap = cv2.normalize(
+                            heatmap_accumulator,
+                            None,
+                            0,
+                            255,
+                            cv2.NORM_MINMAX
+                        ).astype(np.uint8)
+
+                        colored_heatmap = cv2.applyColorMap(
+                            normalized_heatmap,
+                            cv2.COLORMAP_JET
                         )
+
+                        heatmap_overlay = cv2.addWeighted(
+                            last_frame,
+                            0.6,
+                            colored_heatmap,
+                            0.4,
+                            0
+                        )
+
+                        heatmap_success, encoded_heatmap = cv2.imencode(
+                            ".png",
+                            heatmap_overlay
+                        )
+
+                        if heatmap_success:
+                            st.session_state["processed_heatmap"] = encoded_heatmap.tobytes()
+                    else:
+                        st.session_state.pop("processed_heatmap", None)
 
                 else:
 
@@ -562,6 +948,41 @@ elif page == "Video Detection":
 
                 status.empty()
 
+        # Keep the processed video visible after Streamlit reruns,
+        # including the rerun caused by clicking the download button.
+        if st.session_state.get("processed_video"):
+
+            st.subheader("Processed Video")
+
+            st.video(st.session_state["processed_video"])
+
+            st.download_button(
+                "Download Processed Video",
+                data=st.session_state["processed_video"],
+                file_name="tracked_output.mp4",
+                mime="video/mp4",
+                key="download_processed_video"
+            )
+
+        if st.session_state.get("processed_heatmap"):
+            st.subheader("Object Movement Heatmap")
+            st.caption(
+                "Warmer colours indicate areas where tracked object centres "
+                "were recorded more frequently during the video."
+            )
+            st.image(
+                st.session_state["processed_heatmap"],
+                caption="Movement heatmap overlay on the final video frame",
+                use_container_width=True
+            )
+            st.download_button(
+                "Download Movement Heatmap",
+                data=st.session_state["processed_heatmap"],
+                file_name="movement_heatmap.png",
+                mime="image/png",
+                key="download_movement_heatmap"
+            )
+
 
 # ==========================================
 # 10. LIVE WEBCAM DETECTION
@@ -569,20 +990,21 @@ elif page == "Video Detection":
 
 elif page == "Live Webcam":
 
-    st.header("📹 Live Webcam Object Detection")
+    st.header("Live Webcam Detection")
 
     st.write(
-        "Real-time object detection and tracking "
-        "using your laptop camera."
+        "Use your laptop camera to detect and track objects in real time."
     )
 
     st.info(
-        "Allow camera permission when your browser asks for it."
+        "If prompted, allow your browser to access the camera."
     )
 
     webrtc_streamer(
-        key="live-object-detection",
-        video_processor_factory=YOLOVideoProcessor,
+        key=f"live-object-detection-{selected_model}",
+        video_processor_factory=lambda: YOLOVideoProcessor(
+            selected_model
+        ),
         media_stream_constraints={
             "video": True,
             "audio": False
@@ -597,7 +1019,7 @@ elif page == "Live Webcam":
 
 elif page == "Analytics":
 
-    st.header("📊 Detection Analytics")
+    st.header("Detection Analytics")
 
     history = load_detection_history()
 
@@ -614,7 +1036,9 @@ elif page == "Analytics":
 
         total_sessions = len(df)
 
-        total_detections = df["total_objects"].sum()
+        total_detections = int(
+            df["total_objects"].sum()
+        )
 
         image_sessions = len(
             df[df["type"] == "image"]
@@ -626,19 +1050,17 @@ elif page == "Analytics":
 
         # Summary metrics
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3, col4 = st.columns(4)
 
         col1.metric(
-            "Total Detection Sessions",
+            "Total Sessions",
             total_sessions
         )
 
         col2.metric(
-            "Total Objects Detected",
-            int(total_detections)
+            "Total Objects",
+            total_detections
         )
-
-        col3, col4 = st.columns(2)
 
         col3.metric(
             "Image Sessions",
@@ -656,25 +1078,72 @@ elif page == "Analytics":
 
         st.subheader("📋 Detection History")
 
+        display_df = df.copy()
+
+        if "object_counts" in display_df.columns:
+
+            display_df["object_counts"] = display_df[
+                "object_counts"
+            ].apply(
+                lambda x: (
+                    json.dumps(x)
+                    if isinstance(x, dict)
+                    else x
+                )
+            )
+
         st.dataframe(
-            df,
-            use_container_width=True
+            display_df,
+            use_container_width=True,
+            hide_index=True
         )
 
         st.divider()
 
-        # Detection type chart
+        # Charts side by side
 
-        st.subheader("📊 Detection Sessions by Type")
+        chart1, chart2 = st.columns(2)
 
-        st.bar_chart(
-            df["type"].value_counts()
-        )
+        with chart1:
 
-        # Object count chart
+            st.subheader("📊 Sessions by Type")
 
-        st.subheader("🎯 Objects Detected per Session")
+            session_counts = (
+                df["type"]
+                .value_counts()
+                .rename_axis("Detection Type")
+                .rename("Sessions")
+            )
 
-        st.bar_chart(
-            df.set_index("timestamp")["total_objects"]
+            st.bar_chart(
+                session_counts,
+                height=280
+            )
+
+        with chart2:
+
+            st.subheader("🎯 Objects per Session")
+
+            session_objects = df.set_index(
+                "timestamp"
+            )["total_objects"]
+
+            st.bar_chart(
+                session_objects,
+                height=280
+            )
+
+        # Export analytics
+
+        st.divider()
+
+        st.subheader("Export Detection History")
+
+        csv_data = df.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            "Download History as CSV",
+            data=csv_data,
+            file_name="detection_history.csv",
+            mime="text/csv"
         )
